@@ -1,0 +1,23 @@
+```gitignore
+# Ambiente virtual
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+
+# Dados e arrays grandes
+data/luna16/treino/
+data/luna16/fatias/temporarias/
+data/luna16/fatias/imagens.npy
+data/luna16/fatias/mascaras.npy
+
+# Pesos de modelos
+*.pt
+*.pth
+*.ckpt
+
+# Segredos
+.env
+```
