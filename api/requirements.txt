@@ -1,0 +1,6 @@
+# Modo fixo + testes (o mínimo para subir a API)
+fastapi>=0.110
+uvicorn>=0.29
+numpy>=1.26
+httpx>=0.27      # exigido pelo TestClient do FastAPI
+pytest>=8.0

@@ -1,0 +1,5 @@
+# Modo real: tudo do modo fixo + o que os métodos do projeto usam
+-r requirements.txt
+scipy>=1.11
+SimpleITK>=2.3
+torch          # sem GPU: pip install torch --index-url https://download.pytorch.org/whl/cpu
