@@ -40,8 +40,8 @@ Pontos para decidir na reunião:
    fatia** para a tela sobrepor. A tela usa direto em
    `<img src="data:image/png;base64,...">`. Em JSON puro, uma fatia 512×512
    seriam 262 mil números.
-2. **A fatia vem já em janela de exibição (8 bits), não em HU.** Se o Ruan
-   precisar dos valores em HU, o contrato muda.
+2. **A fatia vem já em janela de exibição (8 bits), não em HU.** Se o cliente
+   da API precisar dos valores em HU, o contrato muda.
 3. **Uma fatia por exame** (a `fatia_exemplo`). Se a tela precisar navegar por
    fatias, o endpoint ganha um parâmetro `?fatia=N`.
 4. **Métricas:** `dice`, `iou`, `precisao`, `revocacao` (0 a 1),
