@@ -1,7 +1,11 @@
-# Dependências novas da API (etapa 1). As do src/luna16 (SimpleITK, scipy, torch...)
-# entram aqui na etapa 2.
+# Modo fixo (API_MODO=fixo, padrão): basta este bloco.
 fastapi>=0.110
 uvicorn>=0.29
+numpy>=1.26
 httpx>=0.27      # exigido pelo TestClient do FastAPI
 pytest>=8.0
-numpy>=1.26      # só para api/gerar_dados_exemplo.py
+
+# Modo real (API_MODO=real): mesmas dependências de src/luna16 e api/segmentation.py.
+scipy>=1.11
+SimpleITK>=2.3
+torch>=2.1

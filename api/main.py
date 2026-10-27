@@ -1,22 +1,55 @@
-"""API de segmentacao pulmonar (etapa 1: valores fixos).
+"""API de segmentacao pulmonar.
 
 Subir, a partir da raiz do repositorio:
-    uvicorn api.main:app --reload
-"""
-import base64
-import json
-from pathlib import Path
+    uvicorn api.main:app --reload                       # API_MODO=fixo (padrao)
+    API_MODO=real uvicorn api.main:app --reload         # modelos reais
 
-from fastapi import FastAPI, HTTPException
+API_MODO=fixo  -> respostas inventadas de api/dados_exemplo/ (sem dados do LUNA16)
+API_MODO=real  -> api/servicos/real.py (U-Net e volumes carregados na subida)
+"""
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-PASTA_DADOS = Path(__file__).parent / "dados_exemplo"
-METODOS = ("baseline", "region_growing", "unet")
+from api.erros import METODOS, metodo_invalido
+from api.png import largura_altura
+
+_servico = None
+
+
+def criar_servico():
+    modo = os.getenv("API_MODO", "fixo").strip().lower()
+    if modo == "fixo":
+        from api.servicos.fixo import ServicoFixo
+        return ServicoFixo()
+    if modo == "real":
+        # import aqui dentro: o modo fixo nao precisa de torch nem SimpleITK
+        from api.servicos.real import ServicoReal
+        return ServicoReal()
+    raise RuntimeError(f"API_MODO='{modo}' inválido. Use 'fixo' ou 'real'.")
+
+
+def obter_servico():
+    global _servico
+    if _servico is None:
+        _servico = criar_servico()
+    return _servico
+
+
+@asynccontextmanager
+async def lifespan(app):
+    obter_servico()  # carrega modelo e dados uma vez, na subida
+    yield
+
 
 app = FastAPI(
     title="API de segmentação pulmonar",
-    description="Ponte entre src/luna16/ e a tela. Etapa 1: valores fixos.",
-    version="0.1.0",
+    description="Ponte entre os métodos de segmentação e a tela. "
+                "API_MODO=fixo (valores fixos) ou API_MODO=real (modelos reais).",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 # Liberado para desenvolvimento: a tela do front roda em outra porta.
@@ -28,79 +61,58 @@ app.add_middleware(
 )
 
 
-def erro(status, codigo, mensagem):
-    """Todo erro previsivel sai neste formato: {"detail": {"codigo", "mensagem"}}."""
-    return HTTPException(
-        status_code=status,
-        detail={"codigo": codigo, "mensagem": mensagem},
-    )
+def validar_metodo(metodo):
+    if metodo not in METODOS:
+        raise metodo_invalido(metodo)
 
 
-def ler_json(nome):
-    return json.loads((PASTA_DADOS / nome).read_text(encoding="utf-8"))
-
-
-def png_base64(caminho):
-    return base64.b64encode(caminho.read_bytes()).decode("ascii")
-
-
-def largura_altura_png(caminho):
-    """Le largura e altura do cabecalho IHDR de um PNG."""
-    dados = caminho.read_bytes()[16:24]
-    return int.from_bytes(dados[:4], "big"), int.from_bytes(dados[4:], "big")
-
-
-def buscar_exame(exame_id):
-    for exame in ler_json("exames.json"):
-        if exame["id"] == exame_id:
-            return exame
-    raise erro(
-        404,
-        "exame_inexistente",
-        f"Exame '{exame_id}' não existe. Use GET /exames para ver os disponíveis.",
-    )
+def png(dados):
+    return Response(content=dados, media_type="image/png")
 
 
 @app.get("/saude")
-def saude():
-    return {"status": "ok", "modo": "valores_fixos"}
+def saude(servico=Depends(obter_servico)):
+    return {"status": "ok", "modo": servico.modo}
 
 
 @app.get("/exames")
-def listar_exames():
-    return {"exames": ler_json("exames.json")}
+def listar_exames(servico=Depends(obter_servico)):
+    return {"exames": servico.listar_exames()}
 
 
+# Rotas sincronas (def): o FastAPI roda em thread, sem travar as outras requisicoes.
 @app.get("/exames/{exame_id}/segmentacao/{metodo}")
-def segmentar(exame_id: str, metodo: str):
-    if metodo not in METODOS:
-        raise erro(
-            400,
-            "metodo_invalido",
-            f"Método '{metodo}' inválido. Use um destes: {', '.join(METODOS)}.",
-        )
-    exame = buscar_exame(exame_id)
-
-    pasta = PASTA_DADOS / exame_id
-    fatia_png = pasta / "fatia.png"
-    mascara_png = pasta / f"mascara_{metodo}.png"
-    largura, altura = largura_altura_png(fatia_png)
-    mascara_largura, mascara_altura = largura_altura_png(mascara_png)
-
+def segmentar(exame_id: str, metodo: str, servico=Depends(obter_servico)):
+    validar_metodo(metodo)
+    indice, fatia_png = servico.fatia(exame_id)
+    mascara_png, metricas = servico.segmentar(exame_id, metodo)
+    largura, altura = largura_altura(fatia_png)
+    mascara_largura, mascara_altura = largura_altura(mascara_png)
     return {
         "exame_id": exame_id,
         "metodo": metodo,
-        "modo": "valores_fixos",
+        "modo": servico.modo,
         "fatia": {
-            "indice": exame["fatia_exemplo"],
+            "indice": indice,
             "largura": largura,
             "altura": altura,
-            "png_base64": png_base64(fatia_png),
+            "url": f"/exames/{exame_id}/fatia.png",
         },
         "mascara": {
             "largura": mascara_largura,
             "altura": mascara_altura,
-            "png_base64": png_base64(mascara_png),
+            "url": f"/exames/{exame_id}/segmentacao/{metodo}/mascara.png",
         },
-        "metricas": ler_json("metricas.json")[exame_id][metodo],
+        "metricas": metricas,
     }
+
+
+@app.get("/exames/{exame_id}/fatia.png")
+def fatia_png(exame_id: str, servico=Depends(obter_servico)):
+    return png(servico.fatia(exame_id)[1])
+
+
+@app.get("/exames/{exame_id}/segmentacao/{metodo}/mascara.png")
+def mascara_png(exame_id: str, metodo: str, servico=Depends(obter_servico)):
+    validar_metodo(metodo)
+    return png(servico.segmentar(exame_id, metodo)[0])

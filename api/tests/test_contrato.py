@@ -1,11 +1,13 @@
 """Testes do contrato da API, campo a campo.
 
 Valem na etapa 1 (valores fixos) e na etapa 2 (modelos reais): so conferem
-o FORMATO das respostas, nunca os valores das metricas.
+o FORMATO das respostas, nunca os valores das metricas. Rodam no modo de
+API_MODO (padrao fixo, ver conftest.py).
 
-Rodar, a partir da raiz do repositorio:  pytest
+Rodar, a partir da raiz do repositorio:
+    python -m pytest                    # modo fixo
+    API_MODO=real python -m pytest      # mesmos testes contra os modelos reais
 """
-import base64
 import struct
 import zlib
 
@@ -23,9 +25,15 @@ CAMPOS_METRICAS = {
 }
 
 
-def decodificar_png(texto_base64):
+def baixar_png(url):
+    r = cliente.get(url)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    return r.content
+
+
+def decodificar_png(dados):
     """Decodifica um PNG cinza 8 bits; devolve (largura, altura, linhas de pixels)."""
-    dados = base64.b64decode(texto_base64, validate=True)
     assert dados.startswith(ASSINATURA_PNG), "não é um PNG"
     largura, altura, profundidade, tipo_cor = struct.unpack(">IIBB", dados[16:26])
     assert (profundidade, tipo_cor) == (8, 0), "esperado PNG cinza de 8 bits"
@@ -50,10 +58,11 @@ def test_listar_exames_formato():
         assert set(exame) == CAMPOS_EXAME
         assert isinstance(exame["id"], str) and exame["id"]
         assert isinstance(exame["nome"], str) and exame["nome"]
-        assert isinstance(exame["num_fatias"], int) and exame["num_fatias"] > 0
-        assert isinstance(exame["fatia_exemplo"], int)
-        assert 0 <= exame["fatia_exemplo"] < exame["num_fatias"]
         assert isinstance(exame["baixado"], bool)
+        assert isinstance(exame["num_fatias"], int)
+        assert isinstance(exame["fatia_exemplo"], int)
+        if exame["baixado"]:  # exame nao baixado: tamanho desconhecido (0)
+            assert 0 <= exame["fatia_exemplo"] < exame["num_fatias"]
 
 
 def test_ids_dos_exames_sao_unicos():
@@ -63,7 +72,7 @@ def test_ids_dos_exames_sao_unicos():
 
 def pares_exame_metodo():
     exames = cliente.get("/exames").json()["exames"]
-    return [(e["id"], m) for e in exames for m in METODOS]
+    return [(e["id"], m) for e in exames if e["baixado"] for m in METODOS]
 
 
 @pytest.mark.parametrize("exame_id,metodo", pares_exame_metodo())
@@ -77,19 +86,22 @@ def test_segmentacao_formato(exame_id, metodo):
     assert corpo["metodo"] == metodo
     assert corpo["modo"] in ("valores_fixos", "modelo_real")
 
-    assert set(corpo["fatia"]) == {"indice", "largura", "altura", "png_base64"}
+    assert set(corpo["fatia"]) == {"indice", "largura", "altura", "url"}
     assert isinstance(corpo["fatia"]["indice"], int)
     assert isinstance(corpo["fatia"]["largura"], int)
     assert isinstance(corpo["fatia"]["altura"], int)
-    assert set(corpo["mascara"]) == {"largura", "altura", "png_base64"}
+    assert corpo["fatia"]["url"] == f"/exames/{exame_id}/fatia.png"
+    assert set(corpo["mascara"]) == {"largura", "altura", "url"}
+    assert corpo["mascara"]["url"] == f"/exames/{exame_id}/segmentacao/{metodo}/mascara.png"
 
     metricas = corpo["metricas"]
     assert set(metricas) == CAMPOS_METRICAS
     for campo in ("dice", "iou", "precisao", "revocacao"):
         assert isinstance(metricas[campo], float)
         assert 0.0 <= metricas[campo] <= 1.0
-    assert isinstance(metricas["volume_pulmonar_ml"], float)
-    assert metricas["volume_pulmonar_ml"] > 0
+    # null so no modo real, quando falta o espacamento do voxel
+    volume = metricas["volume_pulmonar_ml"]
+    assert volume is None or (isinstance(volume, float) and volume > 0)
     assert isinstance(metricas["tempo_ms"], int) and metricas["tempo_ms"] >= 0
 
 
@@ -98,10 +110,10 @@ def test_imagens_sao_png_validos_e_batem_com_as_dimensoes(exame_id, metodo):
     corpo = cliente.get(f"/exames/{exame_id}/segmentacao/{metodo}").json()
     fatia, mascara = corpo["fatia"], corpo["mascara"]
 
-    largura, altura, _ = decodificar_png(fatia["png_base64"])
+    largura, altura, _ = decodificar_png(baixar_png(fatia["url"]))
     assert (largura, altura) == (fatia["largura"], fatia["altura"])
 
-    largura, altura, linhas = decodificar_png(mascara["png_base64"])
+    largura, altura, linhas = decodificar_png(baixar_png(mascara["url"]))
     assert (largura, altura) == (mascara["largura"], mascara["altura"])
     # A máscara tem de cobrir a mesma grade da fatia para a tela sobrepor.
     assert (largura, altura) == (fatia["largura"], fatia["altura"])
@@ -111,8 +123,11 @@ def test_imagens_sao_png_validos_e_batem_com_as_dimensoes(exame_id, metodo):
     assert 255 in valores
 
 
-def test_exame_inexistente():
-    r = cliente.get("/exames/nao-existe/segmentacao/unet")
+@pytest.mark.parametrize("rota", [
+    "segmentacao/unet", "fatia.png", "segmentacao/unet/mascara.png",
+])
+def test_exame_inexistente(rota):
+    r = cliente.get(f"/exames/nao-existe/{rota}")
     assert r.status_code == 404
     detalhe = r.json()["detail"]
     assert set(detalhe) == {"codigo", "mensagem"}
@@ -120,9 +135,10 @@ def test_exame_inexistente():
     assert "nao-existe" in detalhe["mensagem"]
 
 
-def test_metodo_invalido():
+@pytest.mark.parametrize("rota", ["segmentacao/magia", "segmentacao/magia/mascara.png"])
+def test_metodo_invalido(rota):
     exame_id = cliente.get("/exames").json()["exames"][0]["id"]
-    r = cliente.get(f"/exames/{exame_id}/segmentacao/magia")
+    r = cliente.get(f"/exames/{exame_id}/{rota}")
     assert r.status_code == 400
     detalhe = r.json()["detail"]
     assert set(detalhe) == {"codigo", "mensagem"}
