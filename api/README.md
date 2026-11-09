@@ -47,7 +47,7 @@ Tudo é lido do HD, sem cópia para o repositório:
 | paciente → série → pasta | `metadata/metadata.csv` |
 | máscara de referência | `mascaras/seg-lungs-LUNA16/seg-lungs-LUNA16/<SeriesInstanceUID>.mhd` |
 | conjunto de cada exame | `divisao_exames/split_novo.csv` (treino / validação / teste) |
-| pesos da U-Net | `treino_seed123/unet_novo_final.pt` |
+| pesos da U-Net | `modelos/unet_seed123/unet_novo_final.pt` (no repositório, copiado de `treino_seed123`) |
 
 Cada exame passa pelo **mesmo pipeline usado no treino e na avaliação da
 U-Net** (`pipeline.run_pipeline_for_uid`, em `codigo_colab_888`):
@@ -68,7 +68,7 @@ a API dá **exatamente** o Dice e o número de voxels de
 | variável | padrão | uso |
 |---|---|---|
 | `API_RAIZ_DATASET` | `D:\DATASET_LUNA16` | pasta do dataset no HD |
-| `API_PESOS_UNET` | `D:\DATASET_LUNA16\treino_seed123\unet_novo_final.pt` | checkpoint da U-Net (qualquer `unet_novo_*.pt`) |
+| `API_PESOS_UNET` | `modelos/unet_seed123/unet_novo_final.pt` | checkpoint da U-Net (qualquer `unet_novo_*.pt`) |
 | `API_EXAMES` | os 3 primeiros do conjunto de **teste** (LIDC-IDRI-0013, 0022, 0024) | exames servidos, separados por vírgula: `PatientID` ou `SeriesInstanceUID` |
 
 - Por padrão a API serve exames do **teste**, que a U-Net não viu no treino.

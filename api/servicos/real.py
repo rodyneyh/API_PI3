@@ -18,6 +18,7 @@ Na subida: carrega a U-Net e os exames de API_EXAMES uma vez. Cada
 import os
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -28,8 +29,9 @@ from src.luna16 import inference
 from src.luna16.preprocessing import CLIP_MAX_HU, CLIP_MIN_HU, ESPACAMENTO_ALVO, preparar_ct, preparar_referencia
 
 # Modelo da reexecucao com seed 123 (497 exames de treino, Dice 0,983 nos 107
-# do teste_interno: treino_seed123/resultados/avaliacao_novo_final_teste_interno.csv).
-PESOS_PADRAO = os.path.join(RAIZ_PADRAO, "treino_seed123", "unet_novo_final.pt")
+# do teste_interno), copiado do HD para o repositorio: funciona sem o HD.
+# Ver modelos/unet_seed123/README.md.
+PESOS_PADRAO = str(Path(__file__).resolve().parents[2] / "modelos" / "unet_seed123" / "unet_novo_final.pt")
 CONJUNTO_PADRAO = "teste_interno"
 QTD_EXAMES_PADRAO = 3
 
