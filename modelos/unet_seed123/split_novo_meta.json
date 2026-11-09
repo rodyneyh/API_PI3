@@ -1,0 +1,18 @@
+{
+  "criado_em": "2026-10-11T13:32:39",
+  "seed": 42,
+  "seed_e_padrao_do_script": true,
+  "resto": "teste_interno",
+  "proporcoes": {
+    "treino": 0.7,
+    "validacao": 0.15
+  },
+  "contagem": {
+    "treino": 497,
+    "validacao": 106,
+    "teste_interno": 107,
+    "anterior": 177,
+    "teste_26_ok": 26
+  },
+  "unidade": "seriesuid (um exame por linha)"
+}

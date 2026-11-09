@@ -17,6 +17,8 @@ data/luna16/fatias/mascaras.npy
 *.pt
 *.pth
 *.ckpt
+# exceção: pesos finais da U-Net usados pela API (7,8 MB), para rodar sem o HD
+!modelos/**/*.pt
 
 # Segredos
 .env

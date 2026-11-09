@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -83,3 +84,64 @@ class UNet(nn.Module):
         d1 = self.dec1(d1)
 
         return self.out(d1)
+
+
+# ---------------------------------------------------------------------------
+# U-Net 2D compacta: a arquitetura dos pesos treinados que estao no HD
+# (D:\DATASET_LUNA16\treino_novo e treino_seed123, unet_novo_*.pt), copiada de
+# D:\DATASET_LUNA16\codigo_colab_888\unet.py. Encoder base->2x->4x, bottleneck
+# 8x, decoder espelhado; os checkpoints usam base_ch=32. Entrada: fatia axial
+# 128x128 em [-1, 1] (ver hu_to_input); saida: logits.
+# ---------------------------------------------------------------------------
+INPUT_SIZE = 128
+
+
+def _conv_block(in_ch, out_ch):
+    return nn.Sequential(
+        nn.Conv2d(in_ch, out_ch, 3, padding=1),
+        nn.BatchNorm2d(out_ch),
+        nn.ReLU(inplace=True),
+        nn.Conv2d(out_ch, out_ch, 3, padding=1),
+        nn.BatchNorm2d(out_ch),
+        nn.ReLU(inplace=True),
+    )
+
+
+class SmallUNet2D(nn.Module):
+    def __init__(self, base_ch=16):
+        super().__init__()
+        c1, c2, c3, cb = base_ch, base_ch * 2, base_ch * 4, base_ch * 8
+
+        self.enc1 = _conv_block(1, c1)
+        self.enc2 = _conv_block(c1, c2)
+        self.enc3 = _conv_block(c2, c3)
+        self.bottleneck = _conv_block(c3, cb)
+
+        self.pool = nn.MaxPool2d(2)
+
+        self.up3 = nn.ConvTranspose2d(cb, c3, 2, stride=2)
+        self.dec3 = _conv_block(cb, c3)
+        self.up2 = nn.ConvTranspose2d(c3, c2, 2, stride=2)
+        self.dec2 = _conv_block(c3, c2)
+        self.up1 = nn.ConvTranspose2d(c2, c1, 2, stride=2)
+        self.dec1 = _conv_block(c2, c1)
+
+        self.out_conv = nn.Conv2d(c1, 1, 1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        b = self.bottleneck(self.pool(e3))
+
+        d3 = self.dec3(torch.cat([self.up3(b), e3], dim=1))
+        d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+
+        return self.out_conv(d1)
+
+
+def hu_to_input(hu_slice, vmin=-1000, vmax=400):
+    """Fatia em HU -> [-1, 1], igual ao treino."""
+    clipped = np.clip(hu_slice, vmin, vmax)
+    return ((clipped - vmin) / (vmax - vmin)) * 2 - 1
