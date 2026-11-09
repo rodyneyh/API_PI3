@@ -37,21 +37,34 @@ def carregar_dicom(pasta):
 
 
 
-def baseline(volume, limiar=-600, raio=2):
+def baseline(volume, limiar=-600, raio=2, confinar=True, morfologia="abertura"):
     """
-    Threshold de -600 HU + erosão morfológica.
+    Threshold de -600 HU, só dentro do corpo, + abertura morfológica.
+
+    confinar=True: descarta o ar fora do paciente (que também fica abaixo de
+    -600 HU) usando mascara_corpo(), a mesma do region growing. Sem isso o
+    "pulmão" incluía todo o fundo da imagem (Dice 0,22-0,42, 13 a 25 L).
+
+    morfologia="abertura": erosão seguida de dilatação; tira ruído sem
+    encolher o pulmão. "erosao" (só erosão) era a versão antiga e corta
+    ~2 voxels da borda inteira (revocação de ~0,90 para ~0,72).
+
+    baseline(v, confinar=False, morfologia="erosao") reproduz o original.
     """
 
     mascara = volume < limiar
 
+    if confinar:
+        mascara &= mascara_corpo(volume)
+
     estrutura = ndi.generate_binary_structure(3, 1)
 
-    if raio:
-        mascara = ndi.binary_erosion(
-            mascara,
-            estrutura,
-            iterations=raio
-        )
+    if raio and morfologia == "abertura":
+        mascara = ndi.binary_opening(mascara, estrutura, iterations=raio)
+    elif raio and morfologia == "erosao":
+        mascara = ndi.binary_erosion(mascara, estrutura, iterations=raio)
+    elif raio:
+        raise ValueError(f"morfologia desconhecida: {morfologia}")
 
     return mascara
 

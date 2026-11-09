@@ -112,9 +112,21 @@ def test_segmentacao_real(cliente, metodo):
     m = corpo["metricas"]
     assert isinstance(m["volume_pulmonar_ml"], float)
     assert isinstance(m["tempo_ms"], int)
-    if metodo == "region_growing":
-        # caso facil: o crescimento de regiao tem de achar os dois pulmoes
+    if metodo in ("region_growing", "baseline"):
+        # caso facil: tem de achar os dois pulmoes; no baseline, sem o ar
+        # fora do corpo (antes o fundo inteiro entrava e o Dice caia)
         assert m["dice"] > 0.8
+
+
+def test_baseline_ignora_ar_fora_do_corpo(cliente):
+    from api.segmentation import baseline
+
+    servico = app.dependency_overrides[obter_servico]()
+    volume, referencia = servico.volumes["sintetico"]
+    novo, antigo = baseline(volume), baseline(volume, confinar=False, morfologia="erosao")
+    assert not novo[:, :4, :].any() and not novo[:, :, :4].any()  # bordas = ar de fora
+    assert antigo[:, :4, :].any()                                  # versao antiga pegava
+    assert novo.sum() < 2 * referencia.sum()
 
 
 def test_cache_calcula_uma_vez(cliente, monkeypatch):
