@@ -6,15 +6,14 @@ variável `API_MODO`:
 | modo | o que devolve | precisa de |
 |---|---|---|
 | `fixo` (padrão) | valores inventados de `api/dados_exemplo/` | só FastAPI |
-| `real` | baseline, region growing e U-Net rodando de verdade | `data/luna16/treino/`, pesos da U-Net, torch, SimpleITK, scipy |
+| `real` | baseline, region growing e U-Net rodando de verdade sobre os DICOM | HD com `DATASET_LUNA16`, torch, SimpleITK, scipy, scikit-image |
 
 O formato das respostas é o mesmo nos dois modos; só o campo `modo` muda
-(`"valores_fixos"` ou `"modelo_real"`). Assim a tela roda sem os dados do LUNA16.
+(`"valores_fixos"` ou `"modelo_real"`). Assim a tela roda sem o HD.
 
 ## Como subir
 
-Sempre a partir da **raiz do repositório** (caminho relativo, não absoluto:
-caminho absoluto quebra a leitura do SimpleITK).
+Sempre a partir da **raiz do repositório**.
 
 ```bash
 pip install -r api/requirements.txt
@@ -26,7 +25,7 @@ pip install -r api/requirements.txt
 uvicorn api.main:app --reload
 ```
 
-**Modo real**:
+**Modo real** (HD externo conectado):
 
 ```bash
 # bash
@@ -38,39 +37,87 @@ $env:API_MODO="real"; uvicorn api.main:app --reload
 A API fica em http://127.0.0.1:8000, com a documentação interativa em
 http://127.0.0.1:8000/docs.
 
-### Configuração do modo real
+### Modo real: de onde vêm os dados
+
+Tudo é lido do HD, sem cópia para o repositório:
+
+| o quê | onde (dentro de `API_RAIZ_DATASET`) |
+|---|---|
+| tomografia (DICOM do LIDC-IDRI) | `lidc_idri/<paciente>/<estudo>/<série>/*.dcm` |
+| paciente → série → pasta | `metadata/metadata.csv` |
+| máscara de referência | `mascaras/seg-lungs-LUNA16/seg-lungs-LUNA16/<SeriesInstanceUID>.mhd` |
+| conjunto de cada exame | `divisao_exames/split_novo.csv` (treino / validação / teste) |
+| pesos da U-Net | `treino_seed123/unet_novo_final.pt` |
+
+Cada exame passa pelo **mesmo pipeline usado no treino e na avaliação da
+U-Net** (`pipeline.run_pipeline_for_uid`, em `codigo_colab_888`):
+
+1. lê a série DICOM (o paciente pode ter várias; vale a que tem máscara no LUNA16);
+2. `src/luna16/preprocessing.py`: troca o padding por ar, clip −1000..400 HU,
+   filtro gaussiano σ = 0,5 e reamostragem para **1 mm isotrópico**;
+3. referência = **pulmões direito e esquerdo** (rótulos 3 e 4 da máscara; a
+   traqueia, rótulo 5, fica de fora), na mesma grade de 1 mm;
+4. `src/luna16/inference.py`, `inferir()`: roda o método pedido sobre esse
+   volume. Os três métodos recebem a mesma entrada, então a comparação é justa.
+
+A U-Net é a `SmallUNet2D` (base 32 canais, fatias 128×128 em [−1, 1]) treinada
+com os 497 exames de treino. Conferido: nos exames LIDC-IDRI-0013, 0022 e 0024
+a API dá **exatamente** o Dice e o número de voxels de
+`treino_seed123/resultados/avaliacao_novo_final_teste_interno.csv`.
 
 | variável | padrão | uso |
 |---|---|---|
-| `API_EXAMES` | `LIDC-IDRI-0001,LIDC-IDRI-0002,LIDC-IDRI-0003` | exames de demonstração (separados por vírgula) |
-| `API_PASTA_DADOS` | `data/luna16/treino` | pasta com `<exame>/imagem.npy` e `mascara.npy` |
-| `API_PESOS_UNET` | `data/luna16/unet_baseline.pt` | pesos da U-Net |
+| `API_RAIZ_DATASET` | `D:\DATASET_LUNA16` | pasta do dataset no HD |
+| `API_PESOS_UNET` | `D:\DATASET_LUNA16\treino_seed123\unet_novo_final.pt` | checkpoint da U-Net (qualquer `unet_novo_*.pt`) |
+| `API_EXAMES` | os 3 primeiros do conjunto de **teste** (LIDC-IDRI-0013, 0022, 0024) | exames servidos, separados por vírgula: `PatientID` ou `SeriesInstanceUID` |
 
-- Na subida a API carrega a U-Net e os volumes dos exames de `API_EXAMES`
-  **uma vez só**. Cada exame ocupa ~200 MB de RAM, por isso a lista é curta.
+- Por padrão a API serve exames do **teste**, que a U-Net não viu no treino.
+  O `nome` do exame diz o conjunto, por exemplo `"Exame LIDC-IDRI-0013 (teste)"`,
+  e avisa `(usado no treino da U-Net)` se o exame estiver entre os de treino do checkpoint.
+- Na subida, a API carrega a U-Net (na GPU, se houver) e faz uma passada de
+  aquecimento; depois lê os exames de `API_EXAMES` **uma vez só** (~2 a 6 s
+  cada, a partir do HD). Cada exame ocupa ~150 MB de RAM, por isso a lista é curta.
 - Cada par (exame, método) é calculado na primeira chamada e fica em **cache**.
-  Na CPU, a primeira chamada da U-Net leva ~1 a 2 min por exame, o region
-  growing ~6 a 13 s e o baseline < 1 s; as próximas respondem em ~20 ms.
-- As métricas comparam com a máscara de referência do LUNA16 (`mascara.npy`).
-- O volume em mL usa `<exame>/espacamento.json`. Os `.npy` não guardam o
-  espaçamento do voxel; para gerá-lo a partir das máscaras `.mhd` do LUNA16:
-  `python api/gerar_espacamento.py`. Sem esse arquivo, `volume_pulmonar_ml` sai `null`.
-- A inferência está isolada em `api/servicos/real.py`, na função `inferir()`,
-  o único ponto que chama os métodos (`api/segmentation.py` e `src/luna16/unet.py`).
-  Quando existir `src/luna16/inference.py`, basta trocar essa função por um import.
+  Com GPU: U-Net ~1,5 a 3 s por exame, region growing ~5 a 9 s, baseline < 0,5 s.
+  Depois disso, ~20 ms.
+- `volume_pulmonar_ml` = voxels marcados × 1 mm³ (o volume está a 1 mm).
+- Exame da lista que não está no HD aparece com `baixado: false` e responde 409.
+  Se o HD não estiver conectado, a API não sobe (mensagem clara); use `API_MODO=fixo`.
+
+#### Resultado nos 3 exames padrão (teste)
+
+| exame | método | Dice | IoU | volume (mL) |
+|---|---|---|---|---|
+| LIDC-IDRI-0013 | baseline | 0,424 | 0,269 | 13 238 |
+| | region growing | 0,982 | 0,964 | 5 086 |
+| | U-Net | **0,983** | **0,966** | 5 054 |
+| LIDC-IDRI-0022 | baseline | 0,285 | 0,166 | 20 755 |
+| | region growing | 0,980 | 0,962 | 5 472 |
+| | U-Net | **0,984** | **0,968** | 5 442 |
+| LIDC-IDRI-0024 | baseline | 0,220 | 0,123 | 24 999 |
+| | region growing | 0,974 | 0,948 | 4 582 |
+| | U-Net | **0,980** | **0,961** | 4 544 |
+
+O baseline (limiar −600 HU + erosão, `api/segmentation.py`) marca também o
+**ar em volta do paciente**, por isso o Dice baixo e o volume de 13 a 25 L. É
+o comportamento do método, não da API; veja a figura em
+`notebooks/resultados/resultado_LIDC-IDRI-0013.png`
+(gerada por `python notebooks/resultados/resultado.py <saida.png>`).
 
 ## Como rodar os testes
 
 ```bash
-python -m pytest                                              # modo fixo
-API_MODO=real API_EXAMES=LIDC-IDRI-0001 python -m pytest      # contrato contra os modelos reais
+python -m pytest                       # modo fixo (+ testes do modo real que não dependem de API_MODO)
+API_MODO=real python -m pytest         # contrato também contra os exames reais do HD
 ```
 
 - `api/tests/test_contrato.py`: confere o formato de cada resposta campo a
   campo, sem olhar os valores das métricas. Roda no modo de `API_MODO`.
-- `api/tests/test_modo_real.py`: roda os três métodos de verdade (com os pesos
-  reais) sobre um volume sintético pequeno; testa o erro 409 e o cache. Não
-  precisa do LUNA16; pula se faltarem os pesos, torch ou SimpleITK.
+- `api/tests/test_modo_real.py`: roda os três métodos de verdade (pesos reais,
+  mesmo pré-processamento) sobre um exame sintético em memória; testa a
+  referência sem traqueia, o erro 409 e o cache. Não precisa do HD, só dos pesos.
+- `api/tests/test_dicom.py`: leitura no HD (888 séries, grade do DICOM igual à
+  da máscara, paciente com duas séries). Pula sem o HD.
 
 O `pytest.ini` aponta só para `api/tests/`, porque os `api/test_*.py` antigos
 são scripts soltos que dependem dos dados locais.
@@ -168,9 +215,9 @@ curl -i http://127.0.0.1:8000/exames/xyz/segmentacao/unet               # 404
 curl -i http://127.0.0.1:8000/exames/demo-001/segmentacao/foo           # 400
 # {"detail":{"codigo":"metodo_invalido","mensagem":"Método 'foo' inválido. Use um destes: baseline, region_growing, unet."}}
 
-# modo real, exame listado em API_EXAMES sem imagem.npy/mascara.npy        # 409
+# modo real, exame listado em API_EXAMES que não está no HD                # 409
 curl -i http://127.0.0.1:8000/exames/LIDC-IDRI-9999/segmentacao/unet
-# {"detail":{"codigo":"exame_nao_baixado","mensagem":"Exame 'LIDC-IDRI-9999' está na lista, mas não foi baixado: ..."}}
+# {"detail":{"codigo":"exame_nao_baixado","mensagem":"Exame 'LIDC-IDRI-9999' está na lista, mas não está no HD: ..."}}
 ```
 
 ## Dados de exemplo (modo fixo)
@@ -189,5 +236,9 @@ regenerar: `python api/gerar_dados_exemplo.py`.
 | `api/erros.py` | erros no formato do contrato |
 | `api/png.py` | codifica PNG cinza sem Pillow |
 | `api/servicos/fixo.py` | modo fixo |
-| `api/servicos/real.py` | modo real: `inferir()`, cache, U-Net carregada uma vez |
-| `api/gerar_espacamento.py` | grava o espaçamento do voxel de cada exame |
+| `api/servicos/real.py` | modo real: exames carregados na subida, métricas, cache |
+| `api/servicos/dicom.py` | acha e lê a série DICOM e a máscara do LUNA16 no HD |
+| `api/segmentation.py` | baseline e region growing |
+| `src/luna16/preprocessing.py` | pré-processamento do treino (HU, gaussiano, 1 mm) |
+| `src/luna16/inference.py` | `inferir()`: único ponto que chama os três métodos; carrega a U-Net |
+| `src/luna16/unet.py` | `SmallUNet2D` (pesos do HD) e a `UNet` antiga de `api/treinar_unet.py` |

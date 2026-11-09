@@ -1,79 +1,44 @@
-"""Modo real (API_MODO=real): roda os metodos do projeto sobre os volumes locais.
+"""Modo real (API_MODO=real): os tres metodos rodando sobre os DICOM do HD.
 
-AVISO: src/luna16/inference.py ainda nao existe. Enquanto isso, a funcao unica
-de inferencia e `inferir()` aqui embaixo, e e o UNICO ponto da API que chama os
-metodos. Quando o inference.py existir, basta trocar `inferir` por um import.
+Fluxo por exame (o mesmo de pipeline.run_pipeline_for_uid, usado no treino e
+na avaliacao da U-Net):
 
-Reaproveita, sem copiar:
-  - api/segmentation.py     -> baseline() (limiar -600 HU) e region_growing()
-  - src/luna16/unet.py      -> UNet, pesos em data/luna16/unet_baseline.pt
-  - api/preparar_fatias.py  -> mesmo pre-processamento do treino (clip -1000..400, /1400, 256x256)
+    DICOM do LIDC-IDRI  --preparar_ct-->  volume HU limpo, suavizado, 1 mm
+    mascara LUNA16      --preparar_referencia-->  pulmao (rotulos 3+4), 1 mm
+    inferir(metodo, volume)  -> mascara prevista -> metricas contra a referencia
 
-Dados: data/luna16/treino/<exame>/{imagem,mascara}.npy (gerados por
-api/preparar_treino.py). O espacamento do voxel vem de espacamento.json na
-mesma pasta (gerado por api/gerar_espacamento.py); sem ele,
-volume_pulmonar_ml sai null.
+Pecas reaproveitadas:
+  - api/servicos/dicom.py        -> acha e le a serie DICOM e a mascara no HD
+  - src/luna16/preprocessing.py  -> pre-processamento do treino
+  - src/luna16/inference.py      -> inferir(): baseline, region growing, U-Net
 
-Na subida: carrega a U-Net e os volumes dos exames de demonstracao uma vez.
-Cada (exame, metodo) e calculado uma vez e fica em cache.
+Na subida: carrega a U-Net e os exames de API_EXAMES uma vez. Cada
+(exame, metodo) e calculado uma vez e fica em cache.
 """
-import json
 import os
 import threading
 import time
-from pathlib import Path
 
 import numpy as np
-import torch
-from scipy.ndimage import zoom
 
-from api import segmentation
 from api.erros import exame_inexistente, exame_nao_baixado
 from api.png import codificar_png
-from src.luna16.unet import UNet
+from api.servicos.dicom import RAIZ_PADRAO, FonteDicom
+from src.luna16 import inference
+from src.luna16.preprocessing import CLIP_MAX_HU, CLIP_MIN_HU, ESPACAMENTO_ALVO, preparar_ct, preparar_referencia
 
-HU_MIN, HU_MAX = -1000.0, 400.0
-TAMANHO_UNET = 256  # mesmo tamanho de api/preparar_fatias.py
-LOTE_UNET = 8
+# Modelo da reexecucao com seed 123 (497 exames de treino, Dice 0,983 nos 107
+# do teste_interno: treino_seed123/resultados/avaliacao_novo_final_teste_interno.csv).
+PESOS_PADRAO = os.path.join(RAIZ_PADRAO, "treino_seed123", "unet_novo_final.pt")
+CONJUNTO_PADRAO = "teste_interno"
+QTD_EXAMES_PADRAO = 3
 
-PASTA_PADRAO = "data/luna16/treino"
-PESOS_PADRAO = "data/luna16/unet_baseline.pt"
-EXAMES_PADRAO = "LIDC-IDRI-0001,LIDC-IDRI-0002,LIDC-IDRI-0003"
-
-
-def carregar_unet(pesos):
-    modelo = UNet()
-    modelo.load_state_dict(torch.load(pesos, map_location="cpu", weights_only=True))
-    modelo.eval()
-    return modelo
-
-
-def segmentar_unet(modelo, volume):
-    """U-Net 2D fatia a fatia, de volta na grade original do exame."""
-    _, altura, largura = volume.shape
-    fy, fx = TAMANHO_UNET / altura, TAMANHO_UNET / largura
-    mascara = np.zeros(volume.shape, dtype=bool)
-    with torch.inference_mode():
-        for inicio in range(0, len(volume), LOTE_UNET):
-            entrada = np.stack([
-                zoom((np.clip(f, HU_MIN, HU_MAX) - HU_MIN) / (HU_MAX - HU_MIN), (fy, fx), order=1)
-                for f in volume[inicio:inicio + LOTE_UNET]
-            ]).astype(np.float32)[:, None]
-            previsto = torch.sigmoid(modelo(torch.from_numpy(entrada)))[:, 0].numpy() > 0.5
-            for i, p in enumerate(previsto):
-                mascara[inicio + i] = zoom(p.astype(np.uint8), (1 / fy, 1 / fx), order=0) > 0
-    return mascara
-
-
-def inferir(metodo, volume, voxel_mm3, modelo_unet):
-    """Funcao unica de inferencia: volume em HU (z, y, x) -> mascara booleana."""
-    if metodo == "baseline":
-        return segmentation.baseline(volume)
-    if metodo == "region_growing":
-        return segmentation.region_growing(volume, voxel_mm3)
-    if metodo == "unet":
-        return segmentar_unet(modelo_unet, volume)
-    raise ValueError(f"metodo desconhecido: {metodo}")
+NOMES_CONJUNTO = {
+    "treino": "treino",
+    "validacao": "validação",
+    "teste_interno": "teste",
+    "anterior": "teste antigo",
+}
 
 
 def comparar(previsto, referencia, voxel_mm3):
@@ -89,33 +54,39 @@ def comparar(previsto, referencia, voxel_mm3):
         "iou": razao(vp, vp + fp + fn),
         "precisao": razao(vp, vp + fp),
         "revocacao": razao(vp, vp + fn),
-        "volume_pulmonar_ml": (
-            round(float(np.count_nonzero(previsto)) * voxel_mm3 / 1000, 1)
-            if voxel_mm3 else None
-        ),
+        "volume_pulmonar_ml": round(float(np.count_nonzero(previsto)) * voxel_mm3 / 1000, 1),
     }
 
 
 def janela_uint8(fatia_hu):
-    """HU -> 0..255 na mesma janela do treino (-1000 a 400)."""
-    return ((np.clip(fatia_hu, HU_MIN, HU_MAX) - HU_MIN) / (HU_MAX - HU_MIN) * 255).astype(np.uint8)
+    """HU -> 0..255 na janela -1000 a 400 (a mesma do pre-processamento)."""
+    return ((np.clip(fatia_hu, CLIP_MIN_HU, CLIP_MAX_HU) - CLIP_MIN_HU)
+            / (CLIP_MAX_HU - CLIP_MIN_HU) * 255).astype(np.uint8)
+
+
+def exames_da_env():
+    return [e.strip() for e in os.getenv("API_EXAMES", "").split(",") if e.strip()]
 
 
 class ServicoReal:
     modo = "modelo_real"
+    voxel_mm3 = float(np.prod(ESPACAMENTO_ALVO))
 
-    def __init__(self, pasta=None, pesos=None, exames=None):
-        self.pasta = Path(pasta or os.getenv("API_PASTA_DADOS", PASTA_PADRAO))
-        pesos = Path(pesos or os.getenv("API_PESOS_UNET", PESOS_PADRAO))
-        ids = exames or [e.strip() for e in os.getenv("API_EXAMES", EXAMES_PADRAO).split(",") if e.strip()]
+    def __init__(self, fonte=None, pesos=None, exames=None):
+        self.fonte = fonte or FonteDicom(os.getenv("API_RAIZ_DATASET", RAIZ_PADRAO))
+        pesos = pesos or os.getenv("API_PESOS_UNET", PESOS_PADRAO)
+        if not os.path.exists(pesos):
+            raise RuntimeError(f"Pesos da U-Net não encontrados em '{pesos}'. Ajuste API_PESOS_UNET ou use API_MODO=fixo.")
+        self.modelo = inference.carregar_unet(pesos)
 
-        if not pesos.exists():
-            raise RuntimeError(f"Pesos da U-Net não encontrados em '{pesos}'. Use API_MODO=fixo.")
-        self.modelo = carregar_unet(pesos)
+        ids = exames or exames_da_env() or self.fonte.pacientes_do_conjunto(CONJUNTO_PADRAO)[:QTD_EXAMES_PADRAO]
+        if not ids:
+            raise RuntimeError("Nenhum exame para servir: defina API_EXAMES (ex.: LIDC-IDRI-0013).")
 
         self.exames = {}   # id -> dict do contrato
-        self.volumes = {}  # id -> (volume, referencia, voxel_mm3)
-        for exame_id in ids:
+        self.volumes = {}  # id -> (volume, referencia)
+        self.motivos = {}  # id -> por que nao esta disponivel
+        for exame_id in dict.fromkeys(ids):  # sem repetidos, na ordem dada
             self.exames[exame_id] = self._carregar(exame_id)
 
         self.cache = {}    # (id, metodo) -> (png, metricas)
@@ -123,22 +94,27 @@ class ServicoReal:
         self.trava_geral = threading.Lock()
 
     def _carregar(self, exame_id):
-        pasta = self.pasta / exame_id
-        imagem, mascara = pasta / "imagem.npy", pasta / "mascara.npy"
-        if not (imagem.exists() and mascara.exists()):
+        serie, motivo = self.fonte.serie(exame_id)
+        if serie is None:
+            self.motivos[exame_id] = motivo
             return {"id": exame_id, "nome": f"Exame {exame_id}",
                     "num_fatias": 0, "fatia_exemplo": 0, "baixado": False}
 
-        volume = np.load(imagem)
-        referencia = np.load(mascara).astype(bool)
-        espacamento = pasta / "espacamento.json"
-        voxel_mm3 = (float(np.prod(json.loads(espacamento.read_text())))
-                     if espacamento.exists() else None)
-        self.volumes[exame_id] = (volume, referencia, voxel_mm3)
+        inicio = time.perf_counter()
+        ct = self.fonte.ler_ct(serie)
+        volume = preparar_ct(ct)
+        referencia = preparar_referencia(self.fonte.ler_mascara(serie), ct)
+        self.volumes[exame_id] = (volume, referencia)
+        print(f"[api] {exame_id}: {volume.shape} a 1 mm, carregado em {time.perf_counter() - inicio:.1f} s", flush=True)
 
         # Fatia de exemplo: a de maior area de pulmao na mascara de referencia.
         area = referencia.reshape(len(referencia), -1).sum(axis=1)
-        return {"id": exame_id, "nome": f"Exame {exame_id}",
+        nome = f"Exame {exame_id}"
+        if serie.uid in self.modelo.uids_treino:
+            nome += " (usado no treino da U-Net)"
+        elif serie.conjunto in NOMES_CONJUNTO:
+            nome += f" ({NOMES_CONJUNTO[serie.conjunto]})"
+        return {"id": exame_id, "nome": nome,
                 "num_fatias": int(volume.shape[0]),
                 "fatia_exemplo": int(np.argmax(area)), "baixado": True}
 
@@ -149,7 +125,7 @@ class ServicoReal:
         if exame_id not in self.exames:
             raise exame_inexistente(exame_id)
         if exame_id not in self.volumes:
-            raise exame_nao_baixado(exame_id, self.pasta / exame_id)
+            raise exame_nao_baixado(exame_id, self.motivos.get(exame_id, ""))
         return self.exames[exame_id]
 
     def fatia(self, exame_id):
@@ -164,12 +140,11 @@ class ServicoReal:
             trava = self.travas.setdefault(chave, threading.Lock())
         with trava:  # duas requisicoes iguais ao mesmo tempo calculam uma vez so
             if chave not in self.cache:
-                volume, referencia, voxel_mm3 = self.volumes[exame_id]
+                volume, referencia = self.volumes[exame_id]
                 inicio = time.perf_counter()
-                # region_growing usa o voxel so para descartar componentes pequenos.
-                previsto = inferir(metodo, volume, voxel_mm3 or 1.0, self.modelo)
+                previsto = inference.inferir(metodo, volume, self.modelo, self.voxel_mm3)
                 tempo_ms = round((time.perf_counter() - inicio) * 1000)
-                metricas = comparar(previsto, referencia, voxel_mm3)
+                metricas = comparar(previsto, referencia, self.voxel_mm3)
                 metricas["tempo_ms"] = tempo_ms
                 png = codificar_png(previsto[exame["fatia_exemplo"]].astype(np.uint8) * 255)
                 self.cache[chave] = (png, metricas)

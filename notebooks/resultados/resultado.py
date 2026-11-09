@@ -1,5 +1,5 @@
 import io, os, sys
-os.environ["API_MODO"] = "real"; os.environ["API_EXAMES"] = "LIDC-IDRI-0001"
+os.environ["API_MODO"] = "real"; os.environ.setdefault("API_EXAMES", "LIDC-IDRI-0013")
 sys.path.insert(0, os.getcwd())
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt, numpy as np
@@ -24,5 +24,5 @@ with TestClient(app) as c:
                      f"{mt['volume_pulmonar_ml']:.0f} mL | {mt['tempo_ms']/1000:.1f} s")
         ax.axis("off")
     fig.suptitle(f"{exame['id']} — fatia {r['fatia']['indice']} de {exame['num_fatias']} (modo {r['modo']})")
-    fig.tight_layout(); fig.savefig(saida, dpi=110)
+    fig.tight_layout(rect=(0, 0, 1, 0.93)); fig.savefig(saida, dpi=110)
 print("salvo", saida)

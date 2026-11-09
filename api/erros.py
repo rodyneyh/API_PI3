@@ -27,11 +27,10 @@ def metodo_invalido(metodo):
     )
 
 
-def exame_nao_baixado(exame_id, pasta):
+def exame_nao_baixado(exame_id, motivo):
     return erro(
         409,
         "exame_nao_baixado",
-        f"Exame '{exame_id}' está na lista, mas não foi baixado: faltam "
-        f"imagem.npy e mascara.npy em '{pasta}'. Gere com api/preparar_treino.py "
-        f"ou suba a API com API_MODO=fixo.",
+        f"Exame '{exame_id}' está na lista, mas não está no HD: {motivo}. "
+        f"Confira API_RAIZ_DATASET ou suba a API com API_MODO=fixo.",
     )
