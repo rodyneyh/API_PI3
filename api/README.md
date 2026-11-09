@@ -78,7 +78,7 @@ a API dá **exatamente** o Dice e o número de voxels de
   aquecimento; depois lê os exames de `API_EXAMES` **uma vez só** (~2 a 6 s
   cada, a partir do HD). Cada exame ocupa ~150 MB de RAM, por isso a lista é curta.
 - Cada par (exame, método) é calculado na primeira chamada e fica em **cache**.
-  Com GPU: U-Net ~1,5 a 3 s por exame, region growing ~5 a 9 s, baseline < 0,5 s.
+  Com GPU: U-Net ~1,5 a 4 s por exame, region growing ~5 a 13 s, baseline ~3 a 4 s.
   Depois disso, ~20 ms.
 - `volume_pulmonar_ml` = voxels marcados × 1 mm³ (o volume está a 1 mm).
 - Exame da lista que não está no HD aparece com `baixado: false` e responde 409.
@@ -88,21 +88,32 @@ a API dá **exatamente** o Dice e o número de voxels de
 
 | exame | método | Dice | IoU | volume (mL) |
 |---|---|---|---|---|
-| LIDC-IDRI-0013 | baseline | 0,424 | 0,269 | 13 238 |
+| LIDC-IDRI-0013 | baseline | 0,948 | 0,901 | 4 752 |
 | | region growing | 0,982 | 0,964 | 5 086 |
 | | U-Net | **0,983** | **0,966** | 5 054 |
-| LIDC-IDRI-0022 | baseline | 0,285 | 0,166 | 20 755 |
+| LIDC-IDRI-0022 | baseline | 0,928 | 0,866 | 4 991 |
 | | region growing | 0,980 | 0,962 | 5 472 |
 | | U-Net | **0,984** | **0,968** | 5 442 |
-| LIDC-IDRI-0024 | baseline | 0,220 | 0,123 | 24 999 |
+| LIDC-IDRI-0024 | baseline | 0,906 | 0,828 | 4 314 |
 | | region growing | 0,974 | 0,948 | 4 582 |
 | | U-Net | **0,980** | **0,961** | 4 544 |
 
-O baseline (limiar −600 HU + erosão, `api/segmentation.py`) marca também o
-**ar em volta do paciente**, por isso o Dice baixo e o volume de 13 a 25 L. É
-o comportamento do método, não da API; veja a figura em
-`notebooks/resultados/resultado_LIDC-IDRI-0013.png`
+Figura: `notebooks/resultados/resultado_LIDC-IDRI-0013.png`
 (gerada por `python notebooks/resultados/resultado.py <saida.png>`).
+
+**Baseline corrigido.** Hoje ele é: limiar −600 HU, só dentro do corpo
+(`mascara_corpo()`, a mesma do region growing) e abertura morfológica. A versão
+antiga (limiar + erosão) tinha dois problemas, medidos nesses 3 exames:
+
+| versão | Dice | volume (mL) | problema |
+|---|---|---|---|
+| limiar + erosão (antiga) | 0,22 a 0,42 | 13 238 a 24 999 | marcava o **ar em volta do paciente** como pulmão |
+| + só dentro do corpo | 0,80 a 0,86 | 3 432 a 3 933 | a erosão corta ~2 voxels da borda inteira (revocação ~0,72) |
+| + abertura no lugar da erosão (atual) | 0,91 a 0,95 | 4 314 a 4 991 | — |
+
+Ele continua abaixo dos outros dois porque os vasos (mais densos que −600 HU)
+ficam como buracos na máscara. A versão antiga continua disponível para
+comparação: `baseline(volume, confinar=False, morfologia="erosao")`.
 
 ## Como rodar os testes
 
